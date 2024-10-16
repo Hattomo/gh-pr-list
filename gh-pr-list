@@ -33,3 +33,187 @@ echo "Hello gh-pr-list!"
 #   {{- end -}}
 # '
 # exec gh api graphql -f query="${QUERY}" --paginate --template="${TEMPLATE}"
+
+#!/bin/bash
+set -e
+
+limit=10
+
+filtered_prs_query=''
+
+requested_prs_query='is:open is:pr review-requested:@me'
+
+created_prs_query='is:open is:pr author:@me'
+
+org='nikkei'
+
+show_help() {
+  cat <<-EOF
+This extension helps you to check pull requests which you need to respond.
+
+USAGE
+  $ gh lspr [flags]
+
+FLAGS
+  -rr, --review-requested   Filter by review requested to others
+  -c, --created             Filter by created by myself
+  -o, --org                 Filter by organization name or user name
+  -l, --limit               Maximum number of items to fetch (default 10)
+  -h, --help                Show help
+
+EXAMPLES
+  $ gh lspr
+  $ gh lspr -l 20
+  $ gh lspr -r
+  $ gh lspr -c
+  $ gh lspr -m -l 15
+EOF
+}
+
+show_filtered_pr_list() {
+  local query='
+  query ($q: String!, $limit: Int = 10) {
+    search(first: $limit, type: ISSUE, query: $q) {
+      nodes {
+        ... on PullRequest {
+          number
+          title
+          url
+          updatedAt
+          isDraft
+          repository {
+            name
+          }
+        }
+      }
+    }
+  }
+  '
+
+  local template='
+{{- tablerow "PR" "Title" "URL" "Updated at" -}}
+{{- range $pr := .data.search.nodes -}}
+  {{- tablerow (printf "#%v" .number | autocolor "green") (truncate 40 .title) (.url | autocolor "cyan") (.updatedAt | timeago | autocolor "white") -}}
+{{- end -}}
+
+{{ if eq (len .data.search.nodes) 0 }}
+{{- printf "No pull requests match your filter" -}}
+{{ else }}
+{{- tablerender -}}
+{{ end }}
+'
+
+  gh api graphql -F q="$1" -F limit="$limit" -f query="$query" --template="$template"
+}
+
+show_multiple_pr_lists() {
+  local query='
+  fragment pr on PullRequest {
+    ... on PullRequest {
+      number
+      title
+      url
+      updatedAt
+      isDraft
+      repository {
+        name
+      }
+      reviewRequests {
+        totalCount
+      }
+    }
+  }
+
+  query ($createdPRQuery: String!, $requestedPRQuery: String!, $limit: Int = 10) {
+    createdPR: search(first: $limit, type: ISSUE, query: $createdPRQuery) {
+      nodes {
+        ...pr
+      }
+    }
+    requestedPR: search(first: $limit, type: ISSUE, query: $requestedPRQuery) {
+      nodes {
+        ...pr
+      }
+    }
+  }
+  '
+
+  local template='
+{{- printf "👀 Review requested pull requests\n\n" | autocolor "magenta+b" -}}
+
+{{- range $pr := .data.requestedPR.nodes -}}
+  {{- tablerow (truncate 40 .title | autocolor "yellow")  (.isDraft | autocolor "green") (.reviewRequests.totalCount | autocolor "magenta") (.repository.name | autocolor "cyan") (printf "#%v" .number | autocolor "green")  (.updatedAt | timeago | autocolor "white")  -}}
+{{- end -}}
+
+{{ if eq (len .data.requestedPR.nodes) 0 }}
+{{- printf "No review requested pull requests\n" -}}
+{{ else }}
+{{- tablerender -}}
+{{ end }}
+
+{{- printf "\n🚀 Created pull requests\n\n" | autocolor "magenta+b" -}}
+
+{{- tablerow ("Title"| autocolor "yellow") ("IsWIP" | autocolor "green") ("RevPend" | autocolor "magenta") ("Repo"| autocolor "cyan") ("PRNum" | autocolor "green") "Update at" -}}
+{{- range $pr := .data.createdPR.nodes -}}
+  {{- tablerow (truncate 40 .title | autocolor "yellow")  (.isDraft | autocolor "green") (.reviewRequests.totalCount | autocolor "magenta") (.repository.name | autocolor "cyan") (printf "#%v" .number | autocolor "green")  (.updatedAt | timeago | autocolor "white")  -}}
+{{- end -}}
+
+{{ if eq (len .data.createdPR.nodes) 0 }}
+{{- printf "No created pull requests\n" -}}
+{{ else }}
+{{- tablerender -}}
+{{ end }}
+'
+
+  gh api graphql -F createdPRQuery="$1" \
+    -F requestedPRQuery="$2" \
+    -F limit="$limit" \
+    -f query="$query" \
+    --template="$template"
+}
+
+handle_filter_flag() {
+  if [ -n "$filtered_prs_query" ] ; then
+    if [ -n "$org" ] ; then
+      show_filtered_pr_list "$filtered_prs_query org:$org"
+      exit 0
+    fi
+
+    show_filtered_pr_list "$filtered_prs_query"
+    exit 0
+  fi
+}
+
+handle_org_flag() {
+  if [ -n "$org" ] ; then
+    show_multiple_pr_lists "$created_prs_query org:$org" "$requested_prs_query org:$org"
+    exit 0
+  fi
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+  -rr|--review-requested)
+    filtered_prs_query="$requested_prs_query"
+    ;;
+  -c|--created)
+    filtered_prs_query="$created_prs_query"
+    ;;
+  -h|--help)
+    show_help
+    exit 0
+    ;;
+  -l|--limit)
+    limit=$2
+    ;;
+  -o|--org)
+    org=$2
+    ;;
+  esac
+  shift
+done
+
+handle_filter_flag
+handle_org_flag
+
+show_multiple_pr_lists "$created_prs_query" "$reviewed_prs_query"
